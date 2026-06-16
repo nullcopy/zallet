@@ -23,7 +23,7 @@ use zcash_client_backend::data_api::{
 use zcash_primitives::{
     block::{Block, BlockHash, BlockHeader},
     merkle_tree::read_commitment_tree,
-    transaction::{Transaction, TransactionData},
+    transaction::Transaction,
 };
 use zcash_protocol::{
     TxId,
@@ -536,47 +536,31 @@ impl ChainView {
             .map_err(|e| ErrorKind::Generic.context(e))?
         {
             None => return Ok(None),
-            Some((raw_tx, Some(consensus_branch_id))) => {
-                let tx = Transaction::read(
-                    raw_tx.as_slice(),
-                    consensus::BranchId::try_from(consensus_branch_id)
-                        // If this fails, it indicates a dependency versioning problem.
+            Some((raw_tx, branch_id)) => {
+                let consensus_branch_id = match branch_id {
+                    // If `try_from` fails, it indicates a dependency versioning problem.
+                    Some(id) => consensus::BranchId::try_from(id)
                         .map_err(|e| ErrorKind::Generic.context(e))?,
-                )
-                .map_err(|e| ErrorKind::Generic.context(e))?;
+                    // Zaino could not determine the consensus branch ID. This happens for
+                    // mempool transactions (when the snapshot's mempool height is unknown)
+                    // and for pre-Overwinter transactions (which predate consensus branch
+                    // IDs). A transaction cannot be mined across a network upgrade
+                    // boundary, and an unmined transaction must be minable at the current
+                    // chain tip, so the branch ID at the mempool height (tip + 1) is the
+                    // correct parsing target. This matches the fallback used by
+                    // `get_mempool_stream`.
+                    None => {
+                        let mempool_height = self.tip().await?.height + 1;
+                        consensus::BranchId::for_height(&self.params, mempool_height)
+                    }
+                };
 
-                Ok((tx, raw_tx))
-            }
-            Some((raw_tx, None)) => {
-                // Use the invariant that a transaction can't be mined across a network
-                // upgrade boundary, so the expiry height must be in the same epoch as the
-                // transaction's target height.
-                let tx_data = Transaction::read(raw_tx.as_slice(), consensus::BranchId::Sprout)
-                    .map_err(|e| ErrorKind::Generic.context(e))?
-                    .into_data();
-
-                let expiry_height = tx_data.expiry_height();
-                if expiry_height > BlockHeight::from(0) {
-                    let tx = TransactionData::from_parts(
-                        tx_data.version(),
-                        consensus::BranchId::for_height(&self.params, expiry_height),
-                        tx_data.lock_time(),
-                        expiry_height,
-                        tx_data.transparent_bundle().cloned(),
-                        tx_data.sprout_bundle().cloned(),
-                        tx_data.sapling_bundle().cloned(),
-                        tx_data.orchard_bundle().cloned(),
-                    )
-                    .freeze()
+                let tx = Transaction::read(raw_tx.as_slice(), consensus_branch_id)
                     .map_err(|e| ErrorKind::Generic.context(e))?;
 
-                    Ok((tx, raw_tx))
-                } else {
-                    Err(ErrorKind::Generic
-                        .context(format!("Consensus branch ID not known for {txid}")))
-                }
+                (tx, raw_tx)
             }
-        }?;
+        };
 
         let (block_hash, mined_height) = match self
             .chain
