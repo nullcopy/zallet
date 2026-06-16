@@ -94,17 +94,12 @@ impl WalletSync {
     ) -> Result<(TaskHandle, TaskHandle, TaskHandle, TaskHandle), Error> {
         let params = config.consensus.network();
 
-        // TODO: Make configurable?
-        let decryptor_queue_size = 1000;
-        let decryptor_batch_size_threshold = 200;
-        let decryptor_batch_start_delay = Duration::from_millis(500);
-        let recover_batch_size = 1000;
+        // The batch decryptor's built-in defaults (queue size 1000, batch-size threshold
+        // 200, batch start delay 500ms) are appropriate for Zallet, so use them as-is.
+        let (decryptor, decryptor_engine) = decryptor::new().build();
 
-        let (decryptor, decryptor_engine) = decryptor::new()
-            .queue_size(decryptor_queue_size)
-            .batch_size_threshold(decryptor_batch_size_threshold)
-            .batch_start_delay(decryptor_batch_start_delay)
-            .build();
+        // TODO: Make configurable?
+        let recover_batch_size = 1000;
 
         // Spawn the processing tasks.
         let batch_decryptor_task = {
