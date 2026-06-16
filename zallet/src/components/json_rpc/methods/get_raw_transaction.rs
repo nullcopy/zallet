@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use transparent::bundle::{TxIn, TxOut};
 use zcash_encoding::ReverseHex;
+use zcash_primitives::block::BlockHash;
 use zcash_primitives::transaction::TxVersion;
 use zcash_protocol::{TxId, value::ZatBalance};
 use zcash_script::script::{Asm, Code};
@@ -477,13 +478,14 @@ pub(crate) async fn call(
     let txid = parse_txid(txid_str)?;
     let verbose = verbose.is_some_and(|v| v != 0);
 
-    // TODO: Support this via `ChainView`.
-    //       https://github.com/zcash/wallet/issues/237
-    if blockhash.is_some() {
-        return Err(
-            LegacyCode::InvalidParameter.with_static("blockhash argument must be unset (for now).")
-        );
-    }
+    // If a block hash is provided, the lookup is restricted to that specific block.
+    let requested_block = blockhash
+        .map(|s| {
+            ReverseHex::decode(&s)
+                .map(BlockHash)
+                .ok_or_else(|| LegacyCode::InvalidParameter.with_static("invalid blockhash"))
+        })
+        .transpose()?;
 
     let chain_view = chain
         .snapshot()
@@ -497,11 +499,36 @@ pub(crate) async fn call(
         Err(e) => Err(LegacyCode::Database.with_message(e.to_string())),
     }?;
 
+    // If the caller restricted the lookup to a specific block, the transaction must be
+    // mined in that block. `in_active_chain` then reports whether that block is part of
+    // the main chain (mirroring `zcashd`, which only sets this field when `blockhash` is
+    // given).
+    let in_active_chain = match requested_block {
+        None => None,
+        Some(requested) => {
+            if tx.block_hash != Some(requested) {
+                return Err(LegacyCode::InvalidAddressOrKey
+                    .with_static("No such transaction found in the provided block"));
+            }
+
+            // The requested block is in the active chain iff it is the canonical block at
+            // the transaction's mined height.
+            let mined_height = tx
+                .mined_height
+                .expect("a transaction with a block hash has a mined height");
+            let canonical = chain_view
+                .get_block_header(mined_height)
+                .await
+                .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+                .map(|header| header.hash());
+            Some(canonical == Some(requested))
+        }
+    };
+
     let blockhash = tx.block_hash.map(|hash| hash.to_string());
     let height = tx
         .mined_height
         .and_then(|h| i32::try_from(u32::from(h)).ok());
-    // TODO: Get semantics right.
     let chain_tip = chain_view
         .tip()
         .await
@@ -518,7 +545,7 @@ pub(crate) async fn call(
     let tx = tx.inner;
 
     Ok(ResultType::Verbose(Box::new(Transaction {
-        in_active_chain: None,
+        in_active_chain,
         hex: tx_hex,
         inner: tx_to_json(wallet.params(), tx, size),
         blockhash,
