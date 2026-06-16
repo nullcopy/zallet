@@ -48,6 +48,14 @@ fn to_zaino_height(height: BlockHeight) -> zaino_state::Height {
         .expect("we won't hit max height for a while")
 }
 
+/// The Zaino finalised-state database schema version to target.
+///
+/// `1` selects Zaino's latest v1 finalised-state schema. We run the indexer in ephemeral
+/// mode (see [`ChainIndexConfig::new`] below), so no persistent finalised-state database
+/// is actually opened and this value has no on-disk effect; it is set to the current
+/// schema version for forward-compatibility if ephemeral mode is ever disabled.
+const ZAINO_FINALISED_DB_VERSION: u32 = 1;
+
 #[derive(Clone)]
 pub(crate) struct Chain {
     subscriber: NodeBackedChainIndexSubscriber,
@@ -144,9 +152,7 @@ impl Chain {
                     size: zaino_common::DatabaseSize(0),
                 },
             },
-            // TODO: Set this sensibly once Zaino documents how to do so. For now, this is
-            // copied from a Zaino `From` impl.
-            1,
+            ZAINO_FINALISED_DB_VERSION,
             params.to_zaino(),
             // Run the finalised state ephemerally: no persistent database, finalised
             // reads are served from the backing validator.
