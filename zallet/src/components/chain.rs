@@ -506,7 +506,6 @@ impl ChainView {
         let mempool_height = self.tip().await?.height + 1;
         let consensus_branch_id = consensus::BranchId::for_height(&self.params, mempool_height);
 
-        // TODO: Should return `impl futures::TryStream` if it is to be fallible.
         Ok(self
             .chain
             .get_mempool_stream(Some(&self.snapshot))
