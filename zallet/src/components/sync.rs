@@ -176,9 +176,9 @@ impl WalletSync {
         });
 
         Ok((
-            batch_decryptor_task,
             steady_state_task,
             recover_history_task,
+            batch_decryptor_task,
             data_requests_task,
         ))
     }
