@@ -32,6 +32,10 @@ pub(super) async fn update_subtree_roots(
     chain: &Chain,
     db_data: &mut DbConnection,
 ) -> Result<(), SyncError> {
+    // TODO: Query and insert only the subtree roots added since our last query (via the
+    // `start_index` parameter of `get_*_subtree_roots`), instead of re-fetching and
+    // re-inserting all historical roots on every call. Not urgent: the cost is small and
+    // grows very slowly. See zcash/wallet#<TODO: incremental-subtree-roots issue>.
     let sapling_roots = chain
         .get_sapling_subtree_roots()
         .await
