@@ -85,12 +85,11 @@ pub(crate) async fn call(wallet: &DbConnection, chain: Chain) -> Response {
     let node_tip = chain
         .snapshot()
         .await
-        // TODO: Better error.
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?
+        // A failure to read the chain state means the indexer is not yet ready.
+        .map_err(|e| LegacyCode::InWarmup.with_message(e.to_string()))?
         .tip()
         .await
-        // TODO: Better error.
-        .map_err(|e| LegacyCode::Database.with_message(e.to_string()))?;
+        .map_err(|e| LegacyCode::InWarmup.with_message(e.to_string()))?;
 
     let wallet_data = wallet
         .with(status_data)
