@@ -353,7 +353,9 @@ async fn steady_state(
                 tokio::pin!(mempool_stream);
                 while let Some(tx) = mempool_stream.next().await {
                     info!("Scanning mempool tx {}", tx.txid());
-                    // TODO: Use batch decryptor for mempool scanning.
+                    // TODO: Route individual-transaction scanning through the batch
+                    // decryptor (`Handle::queue_tx`) once a single-tx store path exists.
+                    // See zcash/wallet#<TODO: batch-decryptor issue>.
                     decrypt_and_store_transaction(params, db_data, &tx, None)?;
                 }
 
@@ -536,6 +538,9 @@ pub(crate) async fn fetch_transparent_utxos(
             }
         };
 
+        // TODO: Route individual-transaction scanning through the batch decryptor
+        // (`Handle::queue_tx`) once a single-tx store path exists.
+        // See zcash/wallet#<TODO: batch-decryptor issue>.
         if let Err(e) = decrypt_and_store_transaction(
             params,
             db_data,
@@ -598,6 +603,9 @@ async fn data_requests(
                         .await
                         .map_err(SyncError::Chain)?
                     {
+                        // TODO: Route individual-transaction scanning through the batch
+                        // decryptor (`Handle::queue_tx`) once a single-tx store path
+                        // exists. See zcash/wallet#<TODO: batch-decryptor issue>.
                         decrypt_and_store_transaction(params, db_data, &tx.inner, tx.mined_height)?;
                     } else {
                         db_data
