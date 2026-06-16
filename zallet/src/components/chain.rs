@@ -562,7 +562,7 @@ impl ChainView {
             }
         };
 
-        let (block_hash, mined_height) = match self
+        let (block_hash, mined_height, in_best_chain) = match self
             .chain
             .get_transaction_status(&self.snapshot, &zaino_txid)
             .await
@@ -571,23 +571,28 @@ impl ChainView {
             (Some(BestChainLocation::Block(hash, height)), _) => (
                 Some(BlockHash(hash.0)),
                 Some(BlockHeight::from_u32(height.into())),
+                true,
             ),
-            (Some(BestChainLocation::Mempool(_)), _) => (None, None),
+            (Some(BestChainLocation::Mempool(_)), _) => (None, None, false),
             (None, orphans) => match orphans.into_iter().next() {
                 Some(NonBestChainLocation::Block(hash, height)) => (
                     Some(BlockHash(hash.0)),
                     Some(BlockHeight::from_u32(height.into())),
+                    false,
                 ),
-                Some(NonBestChainLocation::Mempool(_)) | None => (None, None),
+                Some(NonBestChainLocation::Mempool(_)) | None => (None, None, false),
             },
         };
 
-        let block_time = match mined_height {
-            None => None,
-            Some(height) => self
+        // Only populate the block time for transactions mined into the main chain. The
+        // time of an orphaned block is misleading (the transaction is not in the main
+        // chain) and can differ from the canonical block at the same height.
+        let block_time = match (in_best_chain, mined_height) {
+            (true, Some(height)) => self
                 .get_block_header(height)
                 .await?
                 .map(|header| header.time),
+            _ => None,
         };
 
         Ok(Some(ChainTx {
