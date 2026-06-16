@@ -314,8 +314,9 @@ async fn steady_state(
                 // Ensured by `find_fork_point`.
                 assert!(fork_point.height < prev_tip.height);
 
-                // Rewind the wallet to the fork point.
-                // TODO: Is there anything else we should do with the blocks in the old fork?
+                // Rewind the wallet to the fork point. `truncate_to_height` fully resets
+                // the wallet state to that height, so the blocks in the old fork need no
+                // further handling.
                 info!(
                     "Chain reorg detected, rewinding to {} {}",
                     fork_point.height, fork_point.hash
