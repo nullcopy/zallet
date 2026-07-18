@@ -21,6 +21,25 @@ be considered breaking changes.
   integrators no longer need a `getrawtransaction` round-trip per UTXO to
   distinguish coinbase from spendable-to-transparent funds.
 
+### Fixed
+
+- A transaction broadcast that fails at the transport layer is now retried
+  (three attempts, 100ms backoff doubling) instead of failing the send
+  outright. The JSON-RPC connection to the validator is pooled and kept alive,
+  so a request could land on a connection the validator had already closed and
+  fail before reaching it. This surfaced as intermittent
+  `SendTransaction: Transaction commit failed:: ... error sending request for url`.
+
+  A transport failure does not say whether the validator saw the transaction,
+  so a retry that is rejected because the validator already holds the
+  transaction is now reported as success. Previously such a send was reported
+  as failed even though it had in fact been broadcast.
+
+- Errors from `sendtransaction` are now reported with their full source chain.
+  A transport error's own message is often the least specific one available
+  (`error sending request for url`, with the actual cause in its source), which
+  made these failures hard to diagnose.
+
 ### Changed
 
 - `zallet rpc help` is now answered locally instead of being sent to the

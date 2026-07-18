@@ -1043,13 +1043,30 @@ pub(super) async fn verify_and_broadcast_transactions<C: Chain, FeeRuleT, NoteRe
     if APP.config().external.broadcast() {
         for tx in &transactions {
             chain.broadcast_transaction(tx).await.map_err(|e| {
-                LegacyCode::Wallet
-                    .with_message(format!("SendTransaction: Transaction commit failed:: {e}"))
+                LegacyCode::Wallet.with_message(format!(
+                    "SendTransaction: Transaction commit failed:: {}",
+                    error_chain(&e),
+                ))
             })?;
         }
     }
 
     Ok(SendResult::new(txids))
+}
+
+/// Renders an error together with its source chain, as `outer: inner: root`.
+///
+/// A transport failure's `Display` is often the least specific line in the chain (reqwest
+/// reports "error sending request for url", with the reason it could not be sent in its
+/// source), so an error reported without its sources can be undiagnosable.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut chain = e.to_string();
+    let mut source = e.source();
+    while let Some(e) = source {
+        chain.push_str(&format!(": {e}"));
+        source = e.source();
+    }
+    chain
 }
 
 /// The result of sending a payment.

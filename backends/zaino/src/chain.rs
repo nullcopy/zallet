@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::ops::Range;
+use std::time::Duration;
 
 use futures::{StreamExt, stream::BoxStream};
 use incrementalmerkletree::frontier::CommitmentTree;
@@ -12,7 +13,7 @@ use transparent::address::TransparentAddress;
 #[cfg(feature = "spend-index")]
 use transparent::bundle::OutPoint;
 use zaino_common::{CacheConfig, DatabaseConfig, StorageConfig};
-use zaino_fetch::jsonrpsee::connector::JsonRpSeeConnector;
+use zaino_fetch::jsonrpsee::connector::{JsonRpSeeConnector, RpcRequestError};
 #[cfg(feature = "spend-index")]
 use zaino_state::chain_index::types::{ChainScope, Outpoint};
 use zaino_state::{
@@ -119,6 +120,33 @@ fn to_zaino_height(height: BlockHeight) -> zaino_state::Height {
 /// is actually opened and this value has no on-disk effect; it is set to the current
 /// schema version for forward-compatibility if ephemeral mode is ever disabled.
 const ZAINO_FINALISED_DB_VERSION: u32 = 1;
+
+/// Number of times a transaction broadcast is attempted before giving up.
+const BROADCAST_ATTEMPTS: u32 = 3;
+
+/// Delay before the second broadcast attempt; doubled for each subsequent one.
+const BROADCAST_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Whether a `sendrawtransaction` rejection means the validator already holds the
+/// transaction.
+///
+/// A broadcast that fails at the transport layer leaves the outcome unknown: the request
+/// may never have been written, or the validator may have accepted the transaction and
+/// only the response been lost. Re-broadcasting settles it, because the second attempt is
+/// rejected as a duplicate precisely when the first one landed.
+///
+/// Zebra reports a duplicate as a generic verification failure rather than a distinct
+/// code, and [`SendTransactionError`] has no variant for it (its `TryFrom<RpcError>` is
+/// unimplemented, so the raw response surfaces instead), which leaves the message as the
+/// only signal. See the upstream issue linked in `CHANGELOG.md`.
+///
+/// [`SendTransactionError`]: zaino_fetch::jsonrpsee::response::SendTransactionError
+fn is_already_known(err: &impl fmt::Display) -> bool {
+    let msg = err.to_string().to_lowercase();
+    ["already in mempool", "already in chain", "already in block chain"]
+        .iter()
+        .any(|known| msg.contains(known))
+}
 
 #[derive(Clone)]
 pub struct ZainoChain {
@@ -278,7 +306,7 @@ impl ZainoChain {
             let _sync_handle = sync_handle;
 
             let mut server_interval =
-                tokio::time::interval(tokio::time::Duration::from_millis(100));
+                tokio::time::interval(Duration::from_millis(100));
 
             loop {
                 server_interval.tick().await;
@@ -365,13 +393,36 @@ impl Chain for ZainoChain {
     async fn broadcast_transaction(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut tx_bytes = vec![];
         tx.write(&mut tx_bytes).map_err(ChainError::backend)?;
+        let tx_hex = hex::encode(&tx_bytes);
+        let txid = tx.txid();
 
-        self.fetcher
-            .send_raw_transaction(hex::encode(&tx_bytes))
-            .await
-            .map_err(ChainError::backend)?;
+        let mut attempt = 1;
+        let mut delay = BROADCAST_RETRY_DELAY;
+        loop {
+            match self.fetcher.send_raw_transaction(tx_hex.clone()).await {
+                Ok(_) => return Ok(()),
 
-        Ok(())
+                // The validator is reachable and has rejected the transaction, so the
+                // rejection is the answer. Unless a previous attempt broadcast it: then
+                // "you already sent me this" means that attempt succeeded.
+                Err(e) if attempt > 1 && is_already_known(&e) => {
+                    info!("Transaction {txid} was accepted by an earlier broadcast attempt");
+                    return Ok(());
+                }
+
+                // A transport failure says nothing about whether the validator saw the
+                // transaction, so retry rather than reporting a failure we cannot back up.
+                Err(RpcRequestError::Transport(e)) if attempt < BROADCAST_ATTEMPTS => {
+                    warn!("Broadcast of {txid} failed at the transport layer ({e}); retrying");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    attempt += 1;
+                }
+                Err(RpcRequestError::Transport(e)) => return Err(ChainError::unavailable(e)),
+
+                Err(e) => return Err(ChainError::backend(e)),
+            }
+        }
     }
 
     async fn get_sapling_subtree_roots(
@@ -866,6 +917,36 @@ mod tests {
             assert!(
                 matches!(block_fetch_error(msg), ChainError::Backend(_)),
                 "expected Backend for '{msg}'"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_rejections_are_recognised() {
+        // As surfaced through `RpcRequestError::UnexpectedErrorResponse`, which is what a
+        // re-broadcast hits while `SendTransactionError`'s `TryFrom` is unimplemented.
+        for msg in [
+            "unexpected error response from server: RPC Error (code: -25): transaction already in mempool",
+            "RPC Error (code: -25): Already in chain",
+            "rejected: transaction already in block chain",
+        ] {
+            assert!(is_already_known(&msg), "expected '{msg}' to be a duplicate");
+        }
+    }
+
+    #[test]
+    fn genuine_rejections_are_not_mistaken_for_duplicates() {
+        // A re-broadcast that is rejected on its merits must surface, not be swallowed as
+        // though an earlier attempt had landed the transaction.
+        for msg in [
+            "RPC Error (code: -25): missing inputs",
+            "RPC Error (code: -26): insufficient fee",
+            "transaction expiring soon",
+            "error sending request for url (http://127.0.0.1:8232/)",
+        ] {
+            assert!(
+                !is_already_known(&msg),
+                "expected '{msg}' not to be a duplicate"
             );
         }
     }
