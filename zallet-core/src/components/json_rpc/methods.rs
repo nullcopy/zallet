@@ -12,12 +12,11 @@ use crate::components::{
 
 #[cfg(zallet_build = "wallet")]
 use {
-    super::asyncop::{AsyncOperation, ContextInfo, OperationId},
+    super::asyncop::{ContextInfo, OperationId, OperationQueue},
     crate::components::{
         json_rpc::payments::AmountParameter, keystore::KeyStore, sync::WalletDecryptorHandle,
     },
     serde::Serialize,
-    tokio::sync::RwLock,
 };
 
 mod convert_tex;
@@ -1014,7 +1013,7 @@ pub(crate) struct WalletRpcImpl<C: Chain> {
     general: RpcImpl<C>,
     keystore: KeyStore,
     decryptor: WalletDecryptorHandle,
-    async_ops: RwLock<Vec<AsyncOperation>>,
+    async_ops: OperationQueue,
 }
 
 #[cfg(zallet_build = "wallet")]
@@ -1026,12 +1025,13 @@ impl<C: Chain> WalletRpcImpl<C> {
         chain_view: C,
         decryptor: WalletDecryptorHandle,
         sync_status: SyncStatusReader,
+        async_operation_limit: usize,
     ) -> Self {
         Self {
             general: RpcImpl::new(wallet, keystore.clone(), chain_view, sync_status),
             keystore,
             decryptor,
-            async_ops: RwLock::new(Vec::new()),
+            async_ops: OperationQueue::new(async_operation_limit),
         }
     }
 
@@ -1043,16 +1043,15 @@ impl<C: Chain> WalletRpcImpl<C> {
         self.general.chain().await
     }
 
-    async fn start_async<F, T>(&self, (context, f): (Option<ContextInfo>, F)) -> OperationId
+    async fn start_async<F, T>(
+        &self,
+        (context, f): (Option<ContextInfo>, F),
+    ) -> RpcResult<OperationId>
     where
         F: Future<Output = RpcResult<T>> + Send + 'static,
         T: Serialize + Send + 'static,
     {
-        let mut async_ops = self.async_ops.write().await;
-        let op = AsyncOperation::new(context, f).await;
-        let op_id = op.operation_id().clone();
-        async_ops.push(op);
-        op_id
+        self.async_ops.insert(context, f).await
     }
 }
 
@@ -1385,21 +1384,23 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         privacy_policy: Option<String>,
     ) -> z_send_many::Response {
         self.general.ensure_synced()?;
-        Ok(self
-            .start_async(
-                z_send_many::call(
-                    self.wallet().await?,
-                    self.keystore.clone(),
-                    self.chain().await?,
-                    fromaddress,
-                    amounts,
-                    minconf,
-                    fee,
-                    privacy_policy,
-                )
-                .await?,
+        // Cheaply reject the request if the operation could not be queued, before
+        // doing the expensive work of constructing a proposal.
+        self.async_ops.check_capacity().await?;
+        self.start_async(
+            z_send_many::call(
+                self.wallet().await?,
+                self.keystore.clone(),
+                self.chain().await?,
+                fromaddress,
+                amounts,
+                minconf,
+                fee,
+                privacy_policy,
             )
-            .await)
+            .await?,
+        )
+        .await
     }
 
     async fn z_send_from_account(
@@ -1433,6 +1434,9 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
         privacy_policy: Option<String>,
     ) -> z_shieldcoinbase::Response {
         self.general.ensure_synced()?;
+        // Cheaply reject the request if the operation could not be queued, before
+        // doing the expensive work of constructing a proposal.
+        self.async_ops.check_capacity().await?;
         let (preflight, context, fut) = z_shieldcoinbase::call(
             self.wallet().await?,
             self.keystore.clone(),
@@ -1445,7 +1449,7 @@ impl<C: Chain> WalletRpcServer for WalletRpcImpl<C> {
             privacy_policy,
         )
         .await?;
-        let opid = self.start_async((context, fut)).await;
+        let opid = self.start_async((context, fut)).await?;
         Ok(z_shieldcoinbase::ShieldCoinbaseResult::new(preflight, opid))
     }
 
